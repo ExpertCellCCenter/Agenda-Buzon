@@ -157,6 +157,60 @@ def read_uploaded_files(uploaded_files):
     return pd.concat(all_data, ignore_index=True, sort=False)
 
 
+
+
+def get_repository_excel_files():
+    """
+    Lee archivos Excel desde el mismo repositorio para despliegue en GitHub/Streamlit.
+
+    Estructura recomendada:
+    - repo/
+      - app.py
+      - data/
+        - agenda_buzon_cc2_1_2026-04-29_validado.xlsx
+        - agenda_buzon_jv_1_2026-04-29_validado.xlsx
+
+    También busca en la misma carpeta del script por si prefieres dejar los Excel junto al .py.
+    """
+    base_dir = Path(__file__).parent
+
+    search_dirs = [
+        base_dir / "Agenda buzon",
+        base_dir / "datos",
+        base_dir / "excel",
+        base_dir / "archivos",
+        base_dir,
+    ]
+
+    excel_files = []
+
+    for folder in search_dirs:
+        if not folder.exists():
+            continue
+
+        for file in sorted(folder.glob("*.xlsx")):
+            name = file.name.lower()
+
+            if name.startswith("~$"):
+                continue
+
+            if "agenda_buzon" not in name:
+                continue
+
+            excel_files.append(file)
+
+    unique_files = []
+    seen = set()
+
+    for file in excel_files:
+        key = str(file.resolve())
+        if key not in seen:
+            unique_files.append(file)
+            seen.add(key)
+
+    return unique_files
+
+
 # =========================================================
 # SMART COLUMN DETECTION
 # =========================================================
@@ -256,26 +310,45 @@ def classify_status(value):
     if txt == "" or txt in ["NAN", "NONE", "NULL", "N/D", "NA", "SIN DATO"]:
         return "NO CONTACTADO / SIN EVIDENCIA"
 
-    if "HASTA QUE SE PIDIO" in txt:
+    # Cumplimiento operativo
+    if "HASTA QUE SE PIDIO" in txt or "HASTA QUE SE PIDIO LA EVIDENCIA" in txt:
         return "CONTACTADO TARDE"
 
-    if txt in ["SI", "SÍ"]:
+    if txt in ["SI", "SÍ"] or txt.startswith("SI "):
         return "CONTACTADO EN TIEMPO"
 
-    if txt.startswith("SI "):
-        return "CONTACTADO EN TIEMPO"
-
+    # Casos no contactables / informativos
     if "NO TIENE WHATSAPP" in txt or "SIN WHATSAPP" in txt:
         return "CLIENTE SIN WHATSAPP"
+
+    if "LINEA SUSPENDIDA" in txt or "LÍNEA SUSPENDIDA" in txt:
+        return "LÍNEA SUSPENDIDA"
+
+    if "RESTRINGIDA" in txt or "CUENTA RESTRINGIDA" in txt:
+        return "CUENTA RESTRINGIDA"
+
+    if "CAPTURA DE OTRO NUMERO" in txt or "CAPTURA OTRO NUMERO" in txt or "OTRO NUMERO" in txt:
+        return "CAPTURA DE OTRO NÚMERO"
 
     if "YA RENOVO" in txt or "RENOVO" in txt or "RENOVÓ" in txt:
         return "CLIENTE YA RENOVÓ"
 
-    if "NO VIABLE" in txt or "INVIABLE" in txt or "ADEUDO" in txt or "DEUDA" in txt:
+    # Normalización de no viable
+    if (
+        "NO VIABLE" in txt
+        or "N VIABLE" in txt
+        or "INVIABLE" in txt
+        or "NO GESTIONABLE" in txt
+        or "NO GESTION" in txt
+        or "ADEUDO" in txt
+        or "DEUDA" in txt
+        or "IMPROCEDENTE" in txt
+    ):
         return "CLIENTE NO VIABLE"
 
-    return "REVISAR"
-
+    # Si aparece una respuesta nueva, se muestra tal cual ya normalizada,
+    # en lugar de mandarla a una categoría genérica como REVISAR.
+    return txt
 
 def score_category(cat):
     if cat == "CONTACTADO EN TIEMPO":
@@ -460,17 +533,27 @@ def to_excel(dataframes):
 st.title("📊 Reporte Agenda Buzón")
 st.caption("Reporte flexible para diferentes formatos de archivos: CC2, JV, corte 1, corte 2 y layouts distintos.")
 
-uploaded_files = st.file_uploader(
-    "Sube todos tus archivos Excel validados",
-    type=["xlsx"],
-    accept_multiple_files=True
-)
+repo_excel_files = get_repository_excel_files()
 
-if not uploaded_files:
-    st.info("Sube los archivos Excel para generar el reporte.")
+st.sidebar.subheader("Fuente de datos")
+st.sidebar.caption("Leyendo archivos .xlsx desde el repositorio.")
+st.sidebar.write(f"Archivos detectados: {len(repo_excel_files)}")
+
+with st.sidebar.expander("Ver archivos detectados", expanded=False):
+    if repo_excel_files:
+        for file in repo_excel_files:
+            st.write(f"- {file.name}")
+    else:
+        st.write("No se encontraron archivos agenda_buzon*.xlsx.")
+
+if not repo_excel_files:
+    st.error(
+        "No se encontraron archivos Excel en el repositorio. "
+        "Coloca los archivos agenda_buzon*.xlsx en la carpeta data/ o junto al archivo .py."
+    )
     st.stop()
 
-raw = read_uploaded_files(uploaded_files)
+raw = read_uploaded_files(repo_excel_files)
 
 if raw.empty:
     st.error("No se pudo leer información válida de los archivos.")
@@ -541,7 +624,19 @@ sin_evidencia = (df_f["CATEGORIA"] == "NO CONTACTADO / SIN EVIDENCIA").sum()
 sin_whatsapp = (df_f["CATEGORIA"] == "CLIENTE SIN WHATSAPP").sum()
 ya_renovo = (df_f["CATEGORIA"] == "CLIENTE YA RENOVÓ").sum()
 no_viable = (df_f["CATEGORIA"] == "CLIENTE NO VIABLE").sum()
-revisar = (df_f["CATEGORIA"] == "REVISAR").sum()
+
+categorias_principales_metricas = [
+    "CONTACTADO EN TIEMPO",
+    "CONTACTADO TARDE",
+    "NO CONTACTADO / SIN EVIDENCIA",
+    "CLIENTE SIN WHATSAPP",
+    "CLIENTE YA RENOVÓ",
+    "CLIENTE NO VIABLE",
+]
+
+# Categorías reales que se muestran tal cual, por ejemplo:
+# CUENTA RESTRINGIDA, LÍNEA SUSPENDIDA, CAPTURA DE OTRO NÚMERO, etc.
+otros_casos = df_f[~df_f["CATEGORIA"].isin(categorias_principales_metricas)].shape[0]
 
 tasa_contactacion = pct(contactados, total_contactables)
 tasa_en_tiempo = pct(en_tiempo, total_contactables)
@@ -562,7 +657,7 @@ k6.metric("Sin evidencia", f"{tasa_sin_evidencia:.2f}%")
 k7.metric("Sin WhatsApp", f"{sin_whatsapp:,}")
 k8.metric("Ya renovó", f"{ya_renovo:,}")
 k9.metric("No viable", f"{no_viable:,}")
-k10.metric("Revisar", f"{revisar:,}")
+k10.metric("Casos especiales", f"{otros_casos:,}")
 
 st.divider()
 
@@ -570,11 +665,13 @@ st.divider()
 # =========================================================
 # TABS
 # =========================================================
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "📌 Resumen general",
     "👤 Agentes",
     "📈 Mejora",
-    "🧑‍💼 Supervisores"
+    "🧑‍💼 Supervisores",
+    "🧪 Diagnóstico columnas",
+    "📥 Descargar reporte"
 ])
 
 
@@ -711,3 +808,62 @@ with tab4:
     st.dataframe(sup_summary, use_container_width=True)
 
 
+with tab5:
+    st.subheader("Diagnóstico de columnas detectadas")
+    st.caption("Esta pestaña te ayuda a revisar si el archivo cambió de formato.")
+
+    diag = df_f[[
+        "ARCHIVO",
+        "HOJA",
+        "COLUMNA_AGENTE_USADA",
+        "COLUMNA_SUPERVISOR_USADA",
+        "COLUMNA_RESPUESTA_USADA",
+        "COLUMNA_TELEFONO_USADA"
+    ]].drop_duplicates()
+
+    st.dataframe(diag, use_container_width=True)
+
+    st.subheader("Valores detectados en respuesta")
+    valores = (
+        df_f["RESPUESTA_DETECTADA"]
+        .astype(str)
+        .value_counts()
+        .reset_index()
+    )
+    valores.columns = ["RESPUESTA_DETECTADA", "TOTAL"]
+    st.dataframe(valores, use_container_width=True)
+
+
+with tab6:
+    resumen_general = build_summary(df_f, ["CENTRO", "CORTE", "FECHA"])
+    resumen_agentes = build_summary(df_f, ["CENTRO", "CORTE", "AGENTE_DETECTADO"])
+    resumen_supervisores = build_summary(df_f, ["CENTRO", "CORTE", "SUPERVISOR_DETECTADO"])
+    mejora = build_improvement(df_f)
+
+    diagnostico = df_f[[
+        "ARCHIVO",
+        "HOJA",
+        "COLUMNA_AGENTE_USADA",
+        "COLUMNA_SUPERVISOR_USADA",
+        "COLUMNA_RESPUESTA_USADA",
+        "COLUMNA_TELEFONO_USADA"
+    ]].drop_duplicates()
+
+    excel_bytes = to_excel({
+        "Base filtrada": df_f,
+        "Resumen general": resumen_general,
+        "Resumen agentes": resumen_agentes,
+        "Resumen supervisores": resumen_supervisores,
+        "Mejora": mejora,
+        "Diagnostico columnas": diagnostico,
+    })
+
+    st.download_button(
+        label="📥 Descargar reporte Excel",
+        data=excel_bytes,
+        file_name="reporte_agenda_buzon.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+    st.subheader("Vista previa base filtrada")
+    st.dataframe(df_f, use_container_width=True)
