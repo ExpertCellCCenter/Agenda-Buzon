@@ -745,7 +745,7 @@ def to_excel(dataframes):
 # APP
 # =========================================================
 st.title("📊 Reporte Agenda Buzón")
-st.caption("Reporte flexible para diferentes formatos de archivos: CC2, JV, corte 1, corte 2 y layouts distintos.")
+
 
 repo_excel_files = get_repository_excel_files()
 
