@@ -280,17 +280,59 @@ def find_contactado_whatsapp_column(df):
 
 
 def find_respuesta_cliente_column(df):
-    """Detecta la columna 'Repuesta/Respuesta por parte del cliente'.
+    """Detecta la columna de respuesta del cliente.
 
-    En los archivos viene como 'Repuesta por parte del cliente' (con typo),
-    por eso se contempla RESPUESTA y REPUESTA.
+    En los archivos puede venir como:
+    - Respuesta por parte del cliente
+    - Repuesta por parte del cliente
+    - Cliente contestó
+    - Contestó cliente
     """
+    candidatos = []
+
     for col in df.columns:
         col_norm = normalize_text(col).replace("_", " ")
-        tiene_respuesta = "RESPUESTA" in col_norm or "REPUESTA" in col_norm
-        if tiene_respuesta and "CLIENTE" in col_norm:
-            return col
-    return None
+
+        tiene_cliente = "CLIENTE" in col_norm
+        tiene_respuesta = (
+            "RESPUESTA" in col_norm
+            or "REPUESTA" in col_norm
+            or "RESPONDIO" in col_norm
+            or "RESPONDE" in col_norm
+            or "CONTESTO" in col_norm
+            or "CONTESTACION" in col_norm
+        )
+
+        if tiene_cliente and tiene_respuesta:
+            score = 0
+
+            # Priorizar la columna formal usada para este indicador.
+            if "RESPUESTA POR PARTE DEL CLIENTE" in col_norm:
+                score += 100
+            if "REPUESTA POR PARTE DEL CLIENTE" in col_norm:
+                score += 100
+
+            # Variantes directas del mismo indicador.
+            if "CLIENTE CONTESTO" in col_norm:
+                score += 80
+            if "CONTESTO CLIENTE" in col_norm:
+                score += 80
+            if "RESPONDIO CLIENTE" in col_norm:
+                score += 70
+            if "CLIENTE RESPONDE" in col_norm:
+                score += 70
+
+            # Evitar confundir la columna del nombre del cliente con la respuesta.
+            if col_norm.strip() in ["CLIENTE", "NOMBRE CLIENTE", "CLIENTE DETECTADO"]:
+                score -= 100
+
+            candidatos.append((score, col))
+
+    if not candidatos:
+        return None
+
+    candidatos = sorted(candidatos, key=lambda x: x[0], reverse=True)
+    return candidatos[0][1]
 
 
 def detect_columns(df):
@@ -479,21 +521,36 @@ def classify_status(value, source=None):
 def classify_respuesta_cliente(value):
     """Normaliza la columna 'Repuesta/Respuesta por parte del cliente'.
 
-    Para el indicador de clientes que contestaron SOLO cuenta el valor "Si".
-    Cualquier otro valor no se considera como cliente contestado.
+    Para el indicador de clientes que contestaron cuenta cuando la captura
+    indica "Si" o una variante clara que inicia con "Si", por ejemplo:
+    "Si contestó", "Si respondió", "Sí contesto".
     """
     txt = normalize_text(value)
     txt_simple = re.sub(r"[^A-Z0-9]+", " ", txt).strip()
+    tokens = txt_simple.split()
 
     if txt_simple == "" or txt_simple in ["NAN", "NONE", "NULL", "N D", "NA", "SIN DATO"]:
         return "SIN RESPUESTA DEL CLIENTE"
 
-    # ÚNICO valor que cuenta como cliente que sí contestó.
-    if txt_simple == "SI":
+    # Cuenta como cliente que sí contestó cuando el valor empieza claramente con "SI".
+    # Esto evita perder capturas como "Si contesto" o "Sí respondió",
+    # pero no confunde "SIN RESPUESTA" porque el primer token sería "SIN".
+    if tokens and tokens[0] == "SI":
+        return "CLIENTE CONTESTÓ"
+
+    # Respaldo por si en algún archivo se capturó directamente como texto descriptivo.
+    if txt_simple in [
+        "CONTESTO",
+        "CLIENTE CONTESTO",
+        "RESPONDIO",
+        "CLIENTE RESPONDIO",
+        "RESPONDE",
+        "CLIENTE RESPONDE",
+    ]:
         return "CLIENTE CONTESTÓ"
 
     # Se conserva como categoría informativa, pero NO cuenta como contestado.
-    if txt_simple == "NO":
+    if txt_simple == "NO" or txt_simple.startswith("NO "):
         return "CLIENTE NO CONTESTÓ"
 
     # Cualquier otro texto se muestra aparte y NO suma al porcentaje de respuesta del cliente.
