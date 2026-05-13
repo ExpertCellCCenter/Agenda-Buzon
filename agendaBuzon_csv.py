@@ -279,60 +279,101 @@ def find_contactado_whatsapp_column(df):
     return None
 
 
-def find_respuesta_cliente_column(df):
-    """Detecta la columna de respuesta del cliente.
+def is_respuesta_cliente_candidate_column(col):
+    """Identifica columnas candidatas para el indicador de respuesta del cliente."""
+    col_norm = normalize_text(col).replace("_", " ")
 
-    En los archivos puede venir como:
-    - Respuesta por parte del cliente
-    - Repuesta por parte del cliente
-    - Cliente contestó
-    - Contestó cliente
+    tiene_cliente = "CLIENTE" in col_norm
+    tiene_respuesta = (
+        "RESPUESTA" in col_norm
+        or "REPUESTA" in col_norm
+        or "RESPONDIO" in col_norm
+        or "RESPONDE" in col_norm
+        or "CONTESTO" in col_norm
+        or "CONTESTACION" in col_norm
+    )
+
+    if col_norm.strip() in ["CLIENTE", "NOMBRE CLIENTE", "CLIENTE DETECTADO"]:
+        return False
+
+    return tiene_cliente and tiene_respuesta
+
+
+def score_respuesta_cliente_column(col):
+    """Puntúa la columna de respuesta del cliente sin depender de una sola hoja."""
+    col_norm = normalize_text(col).replace("_", " ")
+    score = 0
+
+    if "RESPUESTA POR PARTE DEL CLIENTE" in col_norm:
+        score += 100
+    if "REPUESTA POR PARTE DEL CLIENTE" in col_norm:
+        score += 100
+
+    if "CLIENTE CONTESTO" in col_norm:
+        score += 80
+    if "CONTESTO CLIENTE" in col_norm:
+        score += 80
+    if "RESPONDIO CLIENTE" in col_norm:
+        score += 70
+    if "CLIENTE RESPONDE" in col_norm:
+        score += 70
+
+    if col_norm.strip() in ["CLIENTE", "NOMBRE CLIENTE", "CLIENTE DETECTADO"]:
+        score -= 100
+
+    # En algunos Excel, una hoja trae dos columnas con el mismo nombre
+    # "Repuesta por parte del cliente". Pandas conserva la segunda como ...CLIENTE1.
+    # En esas hojas, la segunda columna es la respuesta real del cliente.
+    if re.search(r"\d+$", normalize_text(col)):
+        score += 5
+
+    return score
+
+
+def find_respuesta_cliente_column(df):
+    """Detecta una columna global de referencia para respuesta del cliente.
+
+    Nota: el valor final se toma fila por fila en prepare_data, porque algunas
+    hojas tienen encabezados duplicados y otras no.
     """
     candidatos = []
 
-    for col in df.columns:
-        col_norm = normalize_text(col).replace("_", " ")
-
-        tiene_cliente = "CLIENTE" in col_norm
-        tiene_respuesta = (
-            "RESPUESTA" in col_norm
-            or "REPUESTA" in col_norm
-            or "RESPONDIO" in col_norm
-            or "RESPONDE" in col_norm
-            or "CONTESTO" in col_norm
-            or "CONTESTACION" in col_norm
-        )
-
-        if tiene_cliente and tiene_respuesta:
-            score = 0
-
-            # Priorizar la columna formal usada para este indicador.
-            if "RESPUESTA POR PARTE DEL CLIENTE" in col_norm:
-                score += 100
-            if "REPUESTA POR PARTE DEL CLIENTE" in col_norm:
-                score += 100
-
-            # Variantes directas del mismo indicador.
-            if "CLIENTE CONTESTO" in col_norm:
-                score += 80
-            if "CONTESTO CLIENTE" in col_norm:
-                score += 80
-            if "RESPONDIO CLIENTE" in col_norm:
-                score += 70
-            if "CLIENTE RESPONDE" in col_norm:
-                score += 70
-
-            # Evitar confundir la columna del nombre del cliente con la respuesta.
-            if col_norm.strip() in ["CLIENTE", "NOMBRE CLIENTE", "CLIENTE DETECTADO"]:
-                score -= 100
-
-            candidatos.append((score, col))
+    for idx, col in enumerate(df.columns):
+        if is_respuesta_cliente_candidate_column(col):
+            candidatos.append((score_respuesta_cliente_column(col), idx, col))
 
     if not candidatos:
         return None
 
-    candidatos = sorted(candidatos, key=lambda x: x[0], reverse=True)
-    return candidatos[0][1]
+    candidatos = sorted(candidatos, key=lambda x: (x[0], x[1]), reverse=True)
+    return candidatos[0][2]
+
+
+def get_row_respuesta_cliente_value(row, respuesta_cliente_candidate_cols, column_order):
+    """Obtiene la respuesta del cliente usando la columna correcta para cada hoja.
+
+    Esto evita que una hoja con encabezados duplicados fuerce al resto de hojas
+    a usar una columna que no existe en ellas.
+    """
+    columnas_hoja = str(row.get("COLUMNAS_HOJA", "")).split("|")
+    columnas_hoja = [c for c in columnas_hoja if c]
+
+    candidatos = [
+        c for c in respuesta_cliente_candidate_cols
+        if c in columnas_hoja
+    ]
+
+    if not candidatos:
+        return "", "NO DETECTADA"
+
+    candidatos = sorted(
+        candidatos,
+        key=lambda c: (score_respuesta_cliente_column(c), column_order.get(c, -1)),
+        reverse=True,
+    )
+
+    col = candidatos[0]
+    return row.get(col, ""), col
 
 
 def detect_columns(df):
@@ -659,17 +700,30 @@ def prepare_data(df):
         if cliente_col else ""
     )
 
-    df["RESPUESTA_CLIENTE_DETECTADA"] = (
-        df[respuesta_cliente_col]
-        if respuesta_cliente_col else ""
+    respuesta_cliente_candidate_cols = [
+        col for col in df.columns
+        if is_respuesta_cliente_candidate_column(col)
+    ]
+    column_order = {col: idx for idx, col in enumerate(df.columns)}
+
+    respuesta_cliente_info = df.apply(
+        lambda row: get_row_respuesta_cliente_value(
+            row,
+            respuesta_cliente_candidate_cols,
+            column_order,
+        ),
+        axis=1,
+        result_type="expand",
     )
+    df["RESPUESTA_CLIENTE_DETECTADA"] = respuesta_cliente_info[0]
+    df["COLUMNA_RESPUESTA_CLIENTE_USADA"] = respuesta_cliente_info[1]
+
     df["RESPUESTA_CLIENTE_NORMALIZADA"] = df["RESPUESTA_CLIENTE_DETECTADA"].apply(classify_respuesta_cliente)
     df["CLIENTE_CONTESTO"] = df["RESPUESTA_CLIENTE_NORMALIZADA"].apply(cliente_contesto_desde_respuesta_cliente)
 
     df["COLUMNA_AGENTE_USADA"] = agente_col or "NO DETECTADA"
     df["COLUMNA_SUPERVISOR_USADA"] = supervisor_col or "NO DETECTADA"
     df["COLUMNA_RESPUESTA_USADA"] = respuesta_col or "NO DETECTADA"
-    df["COLUMNA_RESPUESTA_CLIENTE_USADA"] = respuesta_cliente_col or "NO DETECTADA"
     df["COLUMNA_OBSERVACION_RESPALDO"] = observacion_col or "NO DETECTADA"
     df["COLUMNA_TELEFONO_USADA"] = telefono_col or "NO DETECTADA"
 
